@@ -1,223 +1,250 @@
 import streamlit as st
-import yt_dlp
-import re
+import requests
+import json
+from streamlit_player import st_player
+import pandas as pd
+from typing import Dict, List, Any
 import time
-import random
 
-st.set_page_config(page_title="YouTube Proxy", page_icon="🎥", layout="wide")
+# Streamlit page config
+st.set_page_config(
+    page_title="IPTV Player - LionHD",
+    page_icon="📺",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.markdown("""
-<style>
-    .main-header {font-size: 3rem; font-weight: bold; color: #FF0000;}
-    .video-container {background: #000; padding: 20px; border-radius: 10px;}
-    .error-box {background: #fee; padding: 15px; border-radius: 8px; border-left: 5px solid #f87171;}
-    .success-box {background: #dcfce7; padding: 15px; border-radius: 8px; border-left: 5px solid #10b981;}
-</style>
-""", unsafe_allow_html=True)
+# Configuration
+XSTREAM_URL = "http://lionzhd.com:8080"
+USERNAME = "shadyemad44"
+PASSWORD = "3398495"
 
-@st.cache_data(ttl=300)  # Cache user agent only
-def get_random_user_agent():
-    agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ]
-    return random.choice(agents)
-
-def search_videos(query, max_results=10):
-    """Fixed search with retries"""
-    print(f"🔍 SEARCH: {query}")
-    
-    for attempt in range(3):
-        try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': True,
-                'playlistend': max_results,
-                'user_agent': get_random_user_agent(),
-                'extractor_retries': 2,
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
-                entries = info.get('entries', [])
-                
-                videos = []
-                for entry in entries:
-                    if entry and entry.get('id'):
-                        videos.append({
-                            'id': entry['id'],
-                            'title': entry.get('title', 'Unknown')[:100],
-                            'channel': entry.get('uploader', 'Unknown'),
-                            'duration': 'N/A',
-                            'thumbnail': f"https://i.ytimg.com/vi/{entry['id']}/mqdefault.jpg"
-                        })
-                
-                print(f"✅ SEARCH SUCCESS: {len(videos)} videos")
-                return videos[:max_results]
-                
-        except Exception as e:
-            print(f"❌ Search attempt {attempt+1} failed: {str(e)}")
-            if attempt < 2:
-                time.sleep(2 ** attempt)  # Exponential backoff
-            continue
-    
-    print("❌ ALL SEARCH ATTEMPTS FAILED")
-    return []
-
-def get_video_info(video_id):
-    """Get video metadata"""
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'user_agent': get_random_user_agent(),
-    }
-    
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_auth_token():
+    """Authenticate with Xstream server"""
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://youtube.com/watch?v={video_id}", download=False)
-            duration = info.get('duration', 0)
-            return {
-                'title': info.get('title', 'Unknown'),
-                'channel': info.get('uploader', 'Unknown'),
-                'duration': format_duration(duration),
-                'views': f"{info.get('view_count', 0):,}" if info.get('view_count') else 'N/A'
-            }
+        auth_url = f"{XSTREAM_URL}/player_api.php"
+        params = {
+            "username": USERNAME,
+            "password": PASSWORD
+        }
+        response = requests.get(auth_url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("user_info"):
+                return {
+                    "token": data.get("token", ""),
+                    "user_info": data.get("user_info", {}),
+                    "server_info": data.get("server_info", {})
+                }
+        return None
+    except Exception as e:
+        st.error(f"Authentication failed: {str(e)}")
+        return None
+
+@st.cache_data(ttl=600)
+def get_categories(token: str = None) -> List[Dict]:
+    """Get available categories"""
+    try:
+        url = f"{XSTREAM_URL}/player_api.php?username={USERNAME}&password={PASSWORD}&action=get_live_categories"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("categories", [])
+        return []
     except:
-        return {'title': 'Unknown', 'channel': 'Unknown', 'duration': 'N/A', 'views': 'N/A'}
+        return []
 
-def get_stream_url(video_id):
-    """Get working stream URL with multiple format attempts"""
-    print(f"🎥 STREAM: {video_id}")
-    
-    formats_to_try = [
-        'best[height<=720][ext=mp4]',
-        'best[height<=480][ext=mp4]', 
-        'worst[ext=mp4]',
-        'best[height<=720]',
-        'best'
-    ]
-    
-    for fmt in formats_to_try:
-        try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'format': fmt,
-                'noplaylist': True,
-                'user_agent': get_random_user_agent(),
-                'extractor_retries': 3,
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"https://youtube.com/watch?v={video_id}", download=False)
-                
-                # Try direct URL first
-                if info.get('url') and 'manifest' not in info.get('url', '').lower():
-                    print(f"✅ STREAM FOUND: {fmt}")
-                    return info['url']
-                
-                # Try formats
-                for f in info.get('formats', []):
-                    if f.get('url') and f.get('vcodec') != 'none':
-                        print(f"✅ FORMAT STREAM: {f.get('format_id', 'unknown')}")
-                        return f['url']
-                        
-        except Exception as e:
-            print(f"❌ Format {fmt} failed: {str(e)}")
-            continue
-    
-    print("❌ NO STREAM URL FOUND")
-    return None
+@st.cache_data(ttl=600)
+def get_live_streams(category_id: str = None) -> List[Dict]:
+    """Get live streams"""
+    try:
+        params = {"username": USERNAME, "password": PASSWORD}
+        if category_id:
+            params["category_id"] = category_id
+        url = f"{XSTREAM_URL}/player_api.php?action=get_live_streams"
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data
+        return []
+    except:
+        return []
 
-def extract_video_id(url):
-    patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11})',
-        r'(?:embed\/|shorts\/)([0-9A-Za-z_-]{11})',
-        r'(?:watch\?v=)([0-9A-Za-z_-]{11})',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    return None
+@st.cache_data(ttl=600)
+def get_vod_streams(category_id: str = None) -> List[Dict]:
+    """Get VOD (Movies/Series)"""
+    try:
+        params = {"username": USERNAME, "password": PASSWORD}
+        if category_id:
+            params["category_id"] = category_id
+        url = f"{XSTREAM_URL}/player_api.php?action=get_vod_streams"
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data
+        return []
+    except:
+        return []
 
-def format_duration(seconds):
-    if seconds == 0:
-        return "Live"
-    m, s = divmod(seconds, 60)
-    return f"{m}:{s:02d}"
-
-# MAIN APP
-st.markdown('<h1 class="main-header">🎥 YouTube Proxy</h1>', unsafe_allow_html=True)
-
-if 'current_video' not in st.session_state:
-    st.session_state.current_video = None
-
-tab1, tab2 = st.tabs(["🔍 Search", "🔗 Direct URL"])
-
-with tab1:
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        search_query = st.text_input("Search videos...", placeholder="Try 'cats' or 'coding tutorial'")
-    with col2:
-        search_btn = st.button("🔍 Search", use_container_width=True)
-    
-    if search_btn and search_query.strip():
-        with st.spinner("🔎 Searching..."):
-            videos = search_videos(search_query.strip())
+@st.cache_data(ttl=600)
+def search_content(query: str) -> List[Dict]:
+    """Search across all content"""
+    try:
+        params = {"username": USERNAME, "password": PASSWORD, "search": query}
+        url_live = f"{XSTREAM_URL}/player_api.php?action=get_live_streams"
+        url_vod = f"{XSTREAM_URL}/player_api.php?action=get_vod_streams"
         
-        if videos:
-            for i, video in enumerate(videos):
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.markdown(f"**{video['title']}**")
-                    st.caption(video['channel'])
-                with col2:
-                    if st.button("▶️ Play", key=f"play_{i}", use_container_width=True):
-                        st.session_state.current_video = video
-                        st.rerun()
-        else:
-            st.error("❌ No videos found. Try different keywords!")
+        live_results = requests.get(url_live, params=params, timeout=10).json()
+        vod_results = requests.get(url_vod, params=params, timeout=10).json()
+        
+        return live_results + vod_results
+    except:
+        return []
 
-with tab2:
-    url = st.text_input("YouTube URL", placeholder="https://youtube.com/watch?v=dQw4w9WgXcQ")
-    if st.button("▶️ Load Video", use_container_width=True) and url.strip():
-        video_id = extract_video_id(url)
-        if video_id:
-            st.session_state.current_video = {'id': video_id, 'title': 'Loading...', 'channel': 'Loading...'}
-            st.rerun()
-        else:
-            st.error("❌ Invalid YouTube URL")
+def get_stream_url(stream_id: str, stream_type: str = "live"):
+    """Get direct stream URL"""
+    try:
+        params = {
+            "username": USERNAME,
+            "password": PASSWORD,
+            "action": "get_live_streams" if stream_type == "live" else "get_vod_streams",
+            "stream_id": stream_id
+        }
+        url = f"{XSTREAM_URL}/player_api.php"
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                return data[0].get("stream_url", "")
+        return ""
+    except:
+        return ""
 
-# VIDEO PLAYER
-if st.session_state.current_video:
-    st.markdown("---")
-    video_id = st.session_state.current_video['id']
+def main():
+    st.title("📺 LionHD IPTV Player")
     
-    with st.spinner("Loading video..."):
-        info = get_video_info(video_id)
+    # Sidebar
+    st.sidebar.header("Navigation")
     
-    st.markdown(f"### 🎥 **{info['title']}**")
-    st.caption(f"👤 {info['channel']} ⏱️ {info['duration']}")
+    # Authentication check
+    with st.spinner("Authenticating..."):
+        auth_data = get_auth_token()
     
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("🔙 Back", use_container_width=True):
-            st.session_state.current_video = None
-            st.rerun()
-    with col2:
-        st.markdown(f"[**YouTube**](https://youtube.com/watch?v={video_id})")
+    if not auth_data:
+        st.error("❌ Authentication failed. Please check credentials.")
+        st.stop()
     
-    with st.spinner("Getting stream..."):
-        stream_url = get_stream_url(video_id)
+    user_info = auth_data["user_info"]
+    st.sidebar.success(f"✅ Logged in as: **{user_info.get('username', 'Unknown')}**")
+    st.sidebar.info(f"📊 Active Connections: {user_info.get('active_cons', 0)}/{user_info.get('max_connections', 0)}")
+    st.sidebar.info(f"⏱️ Expires: {user_info.get('exp_date', 'N/A')}")
     
-    if stream_url:
-        st.video(stream_url)
-        st.success("✅ Playing! Refresh if needed.")
-    else:
-        st.error("❌ Could not load this video. Try another one!")
+    # Main tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["🏠 Live TV", "🎥 Movies", "📺 Series", "🔍 Search"])
+    
+    with tab1:
+        st.header("📡 Live Channels")
+        categories = get_categories()
+        
+        if categories:
+            col1, col2 = st.columns([1, 3])
+            
+            with col1:
+                st.subheader("Categories")
+                selected_cat = st.selectbox("Select Category", 
+                                          ["All"] + [cat["category_name"] for cat in categories],
+                                          format_func=lambda x: x if x == "All" else x)
+            
+            with col2:
+                if selected_cat == "All":
+                    streams = get_live_streams()
+                else:
+                    cat_id = next((cat["category_id"] for cat in categories if cat["category_name"] == selected_cat), None)
+                    streams = get_live_streams(cat_id)
+                
+                if streams:
+                    for stream in streams[:20]:  # Limit to 20 for performance
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            if st.button(f"▶️ {stream.get('name', 'Unknown')}", key=f"live_{stream.get('stream_id')}"):
+                                stream_url = get_stream_url(stream["stream_id"], "live")
+                                if stream_url:
+                                    st_player(stream_url, height=400, config={
+                                        "controls": True,
+                                        "autoplay": False,
+                                        "loop": False
+                                    })
+                                else:
+                                    st.error("Failed to load stream")
+                        with col_b:
+                            st.info(f"{stream.get('stream_icon', '')}")
+                else:
+                    st.warning("No live streams available")
+    
+    with tab2:
+        st.header("🎬 Movies")
+        categories = get_categories()  # VOD categories often same as live
+        
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            selected_cat = st.selectbox("Movie Category", 
+                                      ["All"] + [cat["category_name"] for cat in categories[:10]],
+                                      format_func=lambda x: x if x == "All" else x)
+        
+        with col2:
+            if selected_cat == "All":
+                vod_streams = get_vod_streams()
+            else:
+                cat_id = next((cat["category_id"] for cat in categories if cat["category_name"] == selected_cat), None)
+                vod_streams = get_vod_streams(cat_id)
+            
+            if vod_streams:
+                for stream in vod_streams[:12]:
+                    col_a, col_b = st.columns([3, 1])
+                    with col_a:
+                        if st.button(f"🎥 {stream.get('name', 'Unknown')}", key=f"movie_{stream.get('stream_id')}"):
+                            stream_url = get_stream_url(stream["stream_id"], "vod")
+                            if stream_url:
+                                st_player(stream_url, height=400)
+                            else:
+                                st.error("Failed to load movie")
+                    with col_b:
+                        st.caption(stream.get('rating', ''))
+    
+    with tab3:
+        st.header("📺 Series")
+        # Series often in VOD with specific categories
+        st.info("Series are typically organized by category in Movies tab")
+        search_query = st.text_input("Search for Series", placeholder="Enter series name")
+        if search_query:
+            results = search_content(search_query)
+            for item in results[:10]:
+                if st.button(f"📺 {item.get('name', 'Unknown')}", key=f"series_{item.get('stream_id')}"):
+                    stream_url = get_stream_url(item["stream_id"], "vod")
+                    if stream_url:
+                        st_player(stream_url, height=400)
+    
+    with tab4:
+        st.header("🔍 Search All Content")
+        search_query = st.text_input("Search Live, Movies, Series...", placeholder="Enter search term")
+        
+        if search_query:
+            with st.spinner("Searching..."):
+                results = search_content(search_query)
+            
+            if results:
+                st.success(f"Found {len(results)} results")
+                for item in results[:15]:
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        stream_type = "📡 Live" if "live" in item.get("stream_type", "").lower() else "🎥 VOD"
+                        if st.button(f"{stream_type} {item.get('name', 'Unknown')}", key=f"search_{item.get('stream_id')}"):
+                            stream_url = get_stream_url(item["stream_id"])
+                            if stream_url:
+                                st_player(stream_url, height=400)
+                    with col2:
+                        st.caption(item.get('category_name', ''))
 
 if __name__ == "__main__":
-    st.info("**Test URLs:**\nhttps://youtube.com/watch?v=dQw4w9WgXcQ\nhttps://youtube.com/watch?v=XqZsoesa55w")
+    main()
