@@ -41,7 +41,15 @@ def get_auth_token():
     except Exception as e:
         st.error(f"Authentication failed: {str(e)}")
         return None
-
+def play_stream(url: str):
+    st.markdown(
+        f"""
+        <video width="100%" height="450" controls autoplay>
+            <source src="{url}" type="application/x-mpegURL">
+        </video>
+        """,
+        unsafe_allow_html=True,
+    )
 @st.cache_data(ttl=600)
 def get_categories(token: str = None) -> List[Dict]:
     """Get available categories"""
@@ -272,4 +280,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
