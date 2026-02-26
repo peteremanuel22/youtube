@@ -206,7 +206,15 @@ def main():
                         if st.button(f"🎥 {stream.get('name', 'Unknown')}", key=f"movie_{stream.get('stream_id')}"):
                             stream_url = get_stream_url(stream["stream_id"], "vod")
                             if stream_url:
-                                st_player(stream_url, height=400)
+                                st.markdown(
+    f"""
+    <video width="100%" height="400" controls>
+        <source src="{stream_url}" type="application/x-mpegURL">
+    </video>
+    """,
+    unsafe_allow_html=True,
+)
+
                             else:
                                 st.error("Failed to load movie")
                     with col_b:
@@ -223,7 +231,15 @@ def main():
                 if st.button(f"📺 {item.get('name', 'Unknown')}", key=f"series_{item.get('stream_id')}"):
                     stream_url = get_stream_url(item["stream_id"], "vod")
                     if stream_url:
-                        st_player(stream_url, height=400)
+                        st.markdown(
+    f"""
+    <video width="100%" height="400" controls>
+        <source src="{stream_url}" type="application/x-mpegURL">
+    </video>
+    """,
+    unsafe_allow_html=True,
+)
+
     
     with tab4:
         st.header("🔍 Search All Content")
@@ -242,9 +258,18 @@ def main():
                         if st.button(f"{stream_type} {item.get('name', 'Unknown')}", key=f"search_{item.get('stream_id')}"):
                             stream_url = get_stream_url(item["stream_id"])
                             if stream_url:
-                                st_player(stream_url, height=400)
+                                st.markdown(
+    f"""
+    <video width="100%" height="400" controls>
+        <source src="{stream_url}" type="application/x-mpegURL">
+    </video>
+    """,
+    unsafe_allow_html=True,
+)
+
                     with col2:
                         st.caption(item.get('category_name', ''))
 
 if __name__ == "__main__":
     main()
+
