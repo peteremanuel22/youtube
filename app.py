@@ -105,7 +105,7 @@ def build_stream_url(stream_id: str, typ: str = "live", ext: Optional[str] = Non
     return f"{XSTREAM_URL}/{path}/{USERNAME}/{PASSWORD}/{stream_id}.{ext}"
 
 def render_hls_player(url: str, height: int = 460, autoplay: bool = False) -> None:
-    """HLS-capable HTML5 player using hls.js when needed (fixed <script src> tag)."""
+    """HLS-capable HTML5 player using hls.js when needed (correct <script src>)."""
     element_id = f"video_{int(time.time() * 1000)}"
     auto_attr = "autoplay muted" if autoplay else ""
     html = f"""
@@ -206,13 +206,12 @@ def sidebar_diagnostics():
             icon="⚠️",
         )
 
-    # Buttons do the work; no network calls on page load
     if st.sidebar.button("Run quick diagnostics"):
-        # 1) Ping player_api without creds (some panels still reply)
+        # 1) Ping
         ok_base, _, err_base = _request_json(f"{XSTREAM_URL}/player_api.php")
         log(f"Ping player_api.php → {'OK' if ok_base else 'FAIL'} ({err_base or 'reachable'})")
 
-        # 2) Auth test
+        # 2) Auth
         ok_auth, data_auth, err_auth = get_auth()
         if ok_auth:
             user = data_auth.get("user_info", {})
@@ -220,14 +219,11 @@ def sidebar_diagnostics():
         else:
             log(f"Auth → FAIL ({err_auth})")
 
-        # 3) Live categories
+        # 3) Categories
         ok_c, cats, err_c = get_live_categories()
-        if ok_c:
-            log(f"Live categories → OK (count={len(cats)})")
-        else:
-            log(f"Live categories → FAIL ({err_c})")
+        log(f"Live categories → {'OK' if ok_c else 'FAIL'} ({'count='+str(len(cats)) if ok_c else err_c})")
 
-        # 4) Live streams sample
+        # 4) Streams sample
         ok_s, streams, err_s = get_live_streams()
         if ok_s:
             log(f"Live streams → OK (count={len(streams)})")
@@ -243,7 +239,6 @@ def sidebar_diagnostics():
 def live_tab():
     st.subheader("📡 Live TV")
 
-    # Don’t fetch automatically; user clicks to avoid blocking
     ok, cats, err = get_live_categories()
     if not ok:
         st.error(f"Failed to load categories: {err}")
@@ -397,7 +392,6 @@ def main():
     st.title("📺 LionHD IPTV Player")
 
     # No blocking calls on first paint:
-    # - Auth & data fetch are on-demand via buttons/sections.
     sidebar_diagnostics()
 
     tab1, tab2, tab3, tab4 = st.tabs(["🏠 Live TV", "🎥 Movies", "📺 Series", "🔍 Search"])
