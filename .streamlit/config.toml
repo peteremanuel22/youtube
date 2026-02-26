@@ -6,4 +6,5 @@ textColor = "#FFFFFF"
 font = "sans serif"
 
 [browser]
+
 gatherUsageStats = false
