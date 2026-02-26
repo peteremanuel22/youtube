@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -32,11 +33,25 @@ XSTREAM_URL = _get_secret("xtream", "url", "http://lionzhd.com:8080")
 USERNAME    = _get_secret("xtream", "username", "shadyemad44")
 PASSWORD    = _get_secret("xtream", "password", "3398495")
 
-# Short timeouts => no infinite spinners
-REQ_TIMEOUT = 6          # seconds
-CACHE_TTL   = 300        # seconds
+REQ_TIMEOUT = 6
+CACHE_TTL   = 300
 
-# Simple log collector in session
+# TV-like user agents sometimes bypass panel/WAF filters that block bots
+UA_LIST = [
+    "VLC/3.0.20 LibVLC/3.0.20",
+    "Lavf/58.76.100",                 # ffmpeg
+    "Mozilla/5.0 (SmartTV; Tizen 6.0) AppleWebKit/537.36",
+    "IPTV-Smarters-Player",
+]
+
+DEFAULT_HEADERS = {
+    "User-Agent": UA_LIST[0],
+    "Accept": "application/json, */*;q=0.1",
+    "Accept-Language": "en-US,en;q=0.8",
+    "Connection": "close",
+}
+
+# Session logs
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
 
@@ -45,57 +60,56 @@ def log(msg: str):
     st.session_state["logs"].append(f"[{ts}] {msg}")
 
 def show_logs():
-    if not st.session_state["logs"]:
-        st.write("No logs yet.")
-        return
-    st.text("\n".join(st.session_state["logs"][-500:]))
+    st.text("\n".join(st.session_state["logs"][-500:]) if st.session_state["logs"] else "No logs yet.")
 
 def is_https_page() -> bool:
-    # Streamlit Cloud apps are served over HTTPS.
-    return True
+    return True  # Streamlit Cloud is HTTPS
 
 def warn_mixed_content(url: str):
     if is_https_page() and url.startswith("http://"):
         st.warning(
-            "This app is **HTTPS**, but the stream URL is **HTTP**. "
-            "Browsers block mixed content → playback will be prevented. "
-            "Use an **HTTPS** stream or put an **HTTPS reverse proxy** in front of your provider.",
+            "App is **HTTPS**, but the stream URL is **HTTP**. "
+            "Browsers block embedding HTTP inside HTTPS. Use **Open externally (HTTP)** to play in a new tab.",
             icon="🔒",
         )
 
 # =========================================================
-# Networking helpers (fail-fast, never block UI forever)
+# Networking helpers
 # =========================================================
-def _request_json(url: str, params: Optional[Dict[str, Any]] = None) -> Tuple[bool, Any, str]:
-    """GET JSON with short timeout, returning (ok, data, error)."""
-    try:
-        r = requests.get(url, params=params, timeout=REQ_TIMEOUT)
-        if r.status_code != 200:
-            return False, None, f"HTTP {r.status_code}"
-        try:
-            return True, r.json(), ""
-        except Exception as e:
-            return False, None, f"Invalid JSON: {e}"
-    except requests.exceptions.Timeout:
-        return False, None, "Timeout"
-    except requests.exceptions.ConnectionError as e:
-        return False, None, f"Connection error: {e}"
-    except Exception as e:
-        return False, None, f"Error: {e}"
+def _request(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Tuple[int, bytes, Dict[str, str]]:
+    h = dict(DEFAULT_HEADERS)
+    if headers:
+        h.update(headers)
+    r = requests.get(url, params=params, headers=h, timeout=REQ_TIMEOUT)
+    return r.status_code, r.content, dict(r.headers)
 
-def api_get(action: str, extra_params: Optional[Dict[str, Any]] = None) -> Tuple[bool, Any, str]:
+def _request_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, str, int]:
+    try:
+        code, body, _ = _request(url, params=params, headers=headers)
+        if code != 200:
+            # Try to show a human-readable snippet of the body
+            text = body[:500].decode("utf-8", errors="ignore")
+            return False, None, f"HTTP {code}: {text.strip() or 'No body'}", code
+        try:
+            import json
+            return True, json.loads(body.decode("utf-8", errors="ignore")), "", 200
+        except Exception as e:
+            return False, None, f"Invalid JSON: {e}", 200
+    except requests.exceptions.Timeout:
+        return False, None, "Timeout", 0
+    except requests.exceptions.ConnectionError as e:
+        return False, None, f"Connection error: {e}", 0
+    except Exception as e:
+        return False, None, f"Error: {e}", 0
+
+def api_get(action: str, extra_params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, str, int]:
     params = {"username": USERNAME, "password": PASSWORD, "action": action}
     if extra_params:
         params.update(extra_params)
     url = f"{XSTREAM_URL}/player_api.php"
-    ok, data, err = _request_json(url, params)
-    return ok, data, err
+    return _request_json(url, params=params, headers=headers)
 
 def build_stream_url(stream_id: str, typ: str = "live", ext: Optional[str] = None) -> str:
-    """
-    live:  /live/<user>/<pass>/<id>.m3u8
-    vod:   /movie/<user>/<pass>/<id>.mp4 (some providers use .m3u8)
-    """
     if typ == "live":
         ext = ext or "m3u8"
         path = "live"
@@ -104,15 +118,144 @@ def build_stream_url(stream_id: str, typ: str = "live", ext: Optional[str] = Non
         path = "movie"
     return f"{XSTREAM_URL}/{path}/{USERNAME}/{PASSWORD}/{stream_id}.{ext}"
 
+# =========================================================
+# M3U fallback: get.php?username=...&password=...&type=m3u_plus&output=m3u8
+# =========================================================
+M3U_LINE = f"{XSTREAM_URL}/get.php?username={USERNAME}&password={PASSWORD}&type=m3u_plus&output=m3u8"
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def fetch_m3u(headers: Optional[Dict[str, str]] = None) -> Tuple[bool, str, str, int]:
+    try:
+        code, body, _ = _request(M3U_LINE, headers=headers)
+        if code != 200:
+            text = body[:300].decode("utf-8", errors="ignore")
+            return False, "", f"HTTP {code}: {text or 'No body'}", code
+        return True, body.decode("utf-8", errors="ignore"), "", 200
+    except Exception as e:
+        return False, "", str(e), 0
+
+def parse_m3u(m3u_text: str) -> List[Dict[str, Any]]:
+    """
+    Parse #EXTM3U / #EXTINF entries to [{name, url, tvg_id, group_title, logo}]
+    """
+    items: List[Dict[str, Any]] = []
+    current: Dict[str, Any] = {}
+    for line in m3u_text.splitlines():
+        if line.startswith("#EXTINF:"):
+            # extract attributes
+            attrs = {}
+            # attributes like tvg-id="x" tvg-logo="..." group-title="..."
+            for m in re.finditer(r'(\w+?)="(.*?)"', line):
+                attrs[m.group(1)] = m.group(2)
+            # title is after the comma
+            title = line.split(",", 1)[1].strip() if "," in line else "Unknown"
+            current = {
+                "name": title,
+                "tvg_id": attrs.get("tvg-id") or attrs.get("tvg_id"),
+                "logo": attrs.get("tvg-logo") or attrs.get("tvg_logo"),
+                "group": attrs.get("group-title") or attrs.get("group_title"),
+            }
+        elif line and not line.startswith("#"):
+            # this is the URL line
+            url = line.strip()
+            if current:
+                current["url"] = url
+                items.append(current)
+                current = {}
+    return items
+
+# =========================================================
+# Cached wrappers (API first, M3U fallback)
+# =========================================================
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_auth() -> Tuple[bool, Dict[str, Any], str, int]:
+    url = f"{XSTREAM_URL}/player_api.php"
+    params = {"username": USERNAME, "password": PASSWORD}
+    # Try API with TV-like User-Agent
+    ok, data, err, code = _request_json(url, params=params, headers=DEFAULT_HEADERS)
+    if ok and "user_info" in data:
+        return True, data, "", 200
+    if code == 401:
+        return False, {}, f"HTTP 401 from API (creds blocked/denied): {err}", 401
+    return False, {}, err or "Unknown", code
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_live_categories() -> Tuple[bool, List[Dict[str, Any]], str]:
+    ok, data, err, code = api_get("get_live_categories")
+    if ok:
+        cats = data if isinstance(data, list) else data.get("categories", [])
+        return True, cats or [], ""
+    if code == 401:
+        # Use M3U groups as categories
+        ok2, m3u, err2, _ = fetch_m3u()
+        if not ok2:
+            return False, [], f"API 401 and M3U failed: {err2}"
+        items = parse_m3u(m3u)
+        groups = sorted({it.get("group") or "Other" for it in items})
+        return True, [{"category_name": g, "category_id": g} for g in groups], ""
+    return False, [], err
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_live_streams(category_id: Optional[str] = None) -> Tuple[bool, List[Dict[str, Any]], str]:
+    ok, data, err, code = api_get("get_live_streams", {"category_id": category_id} if category_id else None)
+    if ok and isinstance(data, list):
+        return True, data, ""
+    if code == 401:
+        ok2, m3u, err2, _ = fetch_m3u()
+        if not ok2:
+            return False, [], f"API 401 and M3U failed: {err2}"
+        items = parse_m3u(m3u)
+        if category_id:
+            items = [it for it in items if (it.get("group") or "Other") == category_id]
+        # Convert into API-like shape
+        streams = [{"name": it["name"], "stream_id": it.get("url"), "stream_icon": it.get("logo")} for it in items if it.get("url")]
+        return True, streams, ""
+    return False, [], err
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_vod_categories() -> Tuple[bool, List[Dict[str, Any]], str]:
+    ok, data, err, code = api_get("get_vod_categories")
+    if ok:
+        cats = data if isinstance(data, list) else data.get("categories", [])
+        return True, cats or [], ""
+    if code == 401:
+        # derive VOD groups from M3U too (they’re usually mixed in)
+        ok2, m3u, err2, _ = fetch_m3u()
+        if not ok2:
+            return False, [], f"API 401 and M3U failed: {err2}"
+        items = parse_m3u(m3u)
+        groups = sorted({it.get("group") or "Other" for it in items})
+        return True, [{"category_name": g, "category_id": g} for g in groups], ""
+    return False, [], err
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_vod_streams(category_id: Optional[str] = None) -> Tuple[bool, List[Dict[str, Any]], str]:
+    ok, data, err, code = api_get("get_vod_streams", {"category_id": category_id} if category_id else None)
+    if ok and isinstance(data, list):
+        return True, data, ""
+    if code == 401:
+        ok2, m3u, err2, _ = fetch_m3u()
+        if not ok2:
+            return False, [], f"API 401 and M3U failed: {err2}"
+        items = parse_m3u(m3u)
+        if category_id:
+            items = [it for it in items if (it.get("group") or "Other") == category_id]
+        streams = [{"name": it["name"], "stream_id": it.get("url"), "stream_icon": it.get("logo")} for it in items if it.get("url")]
+        return True, streams, ""
+    return False, [], err
+
+# =========================================================
+# Player helpers
+# =========================================================
 def render_hls_player(url: str, height: int = 460, autoplay: bool = False) -> None:
-    """HLS-capable HTML5 player using hls.js when needed (correct <script src>)."""
+    """We’ll still try to embed; browsers will block HTTP on HTTPS, so we also show 'open externally'."""
     element_id = f"video_{int(time.time() * 1000)}"
     auto_attr = "autoplay muted" if autoplay else ""
     html = f"""
     <html>
     <head>
       <meta charset="utf-8" />
-      <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+      https://cdn.jsdelivr.net/npm/hls.js@latest</script>
       <style>
         body {{ margin:0; padding:0; background-color: transparent; }}
         video {{ width: 100%; height: {height}px; background: #000; }}
@@ -144,97 +287,48 @@ def render_hls_player(url: str, height: int = 460, autoplay: bool = False) -> No
     """
     components.html(html, height=height + 20, scrolling=False)
 
-# =========================================================
-# Cached wrappers (return (ok, data, err) tuples)
-# =========================================================
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_auth() -> Tuple[bool, Dict[str, Any], str]:
-    url = f"{XSTREAM_URL}/player_api.php"
-    params = {"username": USERNAME, "password": PASSWORD}
-    ok, data, err = _request_json(url, params=params)
-    if not ok:
-        return False, {}, err
-    if "user_info" not in data:
-        return False, {}, "Response missing 'user_info'"
-    return True, data, ""
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_live_categories() -> Tuple[bool, List[Dict[str, Any]], str]:
-    ok, data, err = api_get("get_live_categories")
-    if not ok:
-        return False, [], err
-    cats = data if isinstance(data, list) else data.get("categories", [])
-    return True, cats or [], ""
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_vod_categories() -> Tuple[bool, List[Dict[str, Any]], str]:
-    ok, data, err = api_get("get_vod_categories")
-    if not ok:
-        return False, [], err
-    cats = data if isinstance(data, list) else data.get("categories", [])
-    return True, cats or [], ""
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_live_streams(category_id: Optional[str] = None) -> Tuple[bool, List[Dict[str, Any]], str]:
-    extra = {"category_id": category_id} if category_id else None
-    ok, data, err = api_get("get_live_streams", extra)
-    if not ok:
-        return False, [], err
-    return True, data if isinstance(data, list) else [], ""
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_vod_streams(category_id: Optional[str] = None) -> Tuple[bool, List[Dict[str, Any]], str]:
-    extra = {"category_id": category_id} if category_id else None
-    ok, data, err = api_get("get_vod_streams", extra)
-    if not ok:
-        return False, [], err
-    return True, data if isinstance(data, list) else [], ""
+def external_open_button(url: str, label: str = "Open externally (HTTP)"):
+    st.markdown(f'<a href="{url}" target="_blank" rel="noopener noreferrer" class="st-btn">{label}</a>', unsafe_allow_html=True)
 
 # =========================================================
-# UI helpers
+# UI
 # =========================================================
 def sidebar_diagnostics():
     st.sidebar.header("Diagnostics")
 
     st.sidebar.caption(f"Server: `{XSTREAM_URL}`")
     st.sidebar.caption(f"Username: `{USERNAME}`")
-    # (avoid printing password)
 
     if is_https_page() and XSTREAM_URL.startswith("http://"):
         st.sidebar.warning(
-            "App is **HTTPS** but server is **HTTP**. Video playback will be blocked by the browser.",
+            "This app is **HTTPS**; embedding **HTTP** media will be blocked by browsers. "
+            "Use **Open externally (HTTP)** for playback.",
             icon="⚠️",
         )
 
     if st.sidebar.button("Run quick diagnostics"):
-        # 1) Ping
-        ok_base, _, err_base = _request_json(f"{XSTREAM_URL}/player_api.php")
-        log(f"Ping player_api.php → {'OK' if ok_base else 'FAIL'} ({err_base or 'reachable'})")
+        # 1) Ping (no creds)
+        code, body, _ = _request(f"{XSTREAM_URL}/player_api.php")
+        btxt = body[:120].decode("utf-8", errors="ignore")
+        log(f"Ping player_api.php → HTTP {code} ({btxt or 'no body'})")
 
         # 2) Auth
-        ok_auth, data_auth, err_auth = get_auth()
+        ok_auth, data_auth, err_auth, code_auth = get_auth()
         if ok_auth:
             user = data_auth.get("user_info", {})
             log(f"Auth → OK (user={user.get('username')}, status={user.get('status','?')})")
         else:
             log(f"Auth → FAIL ({err_auth})")
 
-        # 3) Categories
-        ok_c, cats, err_c = get_live_categories()
-        log(f"Live categories → {'OK' if ok_c else 'FAIL'} ({'count='+str(len(cats)) if ok_c else err_c})")
-
-        # 4) Streams sample
-        ok_s, streams, err_s = get_live_streams()
-        if ok_s:
-            log(f"Live streams → OK (count={len(streams)})")
-            if streams:
-                sid = streams[0].get("stream_id")
-                test_url = build_stream_url(sid, "live", "m3u8")
-                log(f"Sample live URL: {test_url}")
+        # 3) M3U fallback test
+        ok_m3u, m3u_text, err_m3u, code_m3u = fetch_m3u()
+        if ok_m3u:
+            # light sanity check
+            log(f"M3U → OK (HTTP 200, size={len(m3u_text)} bytes)")
         else:
-            log(f"Live streams → FAIL ({err_s})")
+            log(f"M3U → FAIL ({err_m3u})")
 
-        st.sidebar.success("Diagnostics complete. See logs below.")
+        st.sidebar.success("Diagnostics complete. See logs at bottom.")
 
 def live_tab():
     st.subheader("📡 Live TV")
@@ -244,15 +338,9 @@ def live_tab():
         st.error(f"Failed to load categories: {err}")
         return
 
-    cat_names = ["All"] + [c.get("category_name", f"Cat {i}") for i, c in enumerate(cats)]
-    selected_cat = st.selectbox("Category", cat_names, index=0)
-
-    cat_id = None
-    if selected_cat != "All":
-        for c in cats:
-            if c.get("category_name") == selected_cat:
-                cat_id = c.get("category_id")
-                break
+    names = ["All"] + [c.get("category_name", f"Cat {i}") for i, c in enumerate(cats)]
+    sel = st.selectbox("Category", names, index=0)
+    cat_id = None if sel == "All" else sel  # ID is the same as name for M3U fallback
 
     if st.button("Load Channels", type="secondary"):
         ok_s, streams, err_s = get_live_streams(cat_id)
@@ -271,14 +359,22 @@ def live_tab():
     with colL:
         labels = [f"{s.get('name','Unknown')} · #{s.get('stream_id')}" for s in streams]
         idx = st.selectbox("Channel", options=range(len(labels)), format_func=lambda i: labels[i])
-        if st.button("▶ Play", type="primary", key="play_live"):
-            url = build_stream_url(streams[idx].get("stream_id"), "live", "m3u8")
+        # Determine url (API-style id vs M3U full URL)
+        selected = streams[idx]
+        sid = selected.get("stream_id")
+        if isinstance(sid, str) and sid.startswith("http"):
+            url = sid
+        else:
+            url = build_stream_url(str(sid), "live", "m3u8")
+
+        if st.button("▶ Play (embed)", type="primary", key="play_live"):
             st.session_state["current_live_url"] = url
 
-        if st.button("🔗 Show stream URL", key="show_live_url"):
-            url = build_stream_url(streams[idx].get("stream_id"), "live", "m3u8")
+        if st.button("🔗 Show URL", key="show_live_url"):
             st.code(url, language="text")
             warn_mixed_content(url)
+
+        external_open_button(url, "Open externally (HTTP)")
 
     with colR:
         url = st.session_state.get("current_live_url")
@@ -286,7 +382,7 @@ def live_tab():
             warn_mixed_content(url)
             render_hls_player(url, height=480, autoplay=False)
         else:
-            st.info("Pick a channel and press **Play**.")
+            st.info("Pick a channel and press **Play (embed)** or use **Open externally (HTTP)**.")
 
 def movies_tab():
     st.subheader("🎬 Movies (VOD)")
@@ -296,15 +392,9 @@ def movies_tab():
         st.error(f"Failed to load categories: {err}")
         return
 
-    cat_names = ["All"] + [c.get("category_name", f"Cat {i}") for i, c in enumerate(cats)]
-    selected_cat = st.selectbox("Movie Category", cat_names, index=0)
-
-    cat_id = None
-    if selected_cat != "All":
-        for c in cats:
-            if c.get("category_name") == selected_cat:
-                cat_id = c.get("category_id")
-                break
+    names = ["All"] + [c.get("category_name", f"Cat {i}") for i, c in enumerate(cats)]
+    sel = st.selectbox("Movie Category", names, index=0)
+    cat_id = None if sel == "All" else sel
 
     if st.button("Load Movies", type="secondary"):
         ok_s, streams, err_s = get_vod_streams(cat_id)
@@ -323,17 +413,27 @@ def movies_tab():
     with colL:
         labels = [f"{s.get('name','Unknown')} · #{s.get('stream_id')}" for s in streams]
         idx = st.selectbox("Title", options=range(min(len(labels), 200)), format_func=lambda i: labels[i])
-        fmt = st.radio("Format", ["MP4 (.mp4)", "HLS (.m3u8)"], horizontal=True, key="vod_fmt")
-        if st.button("▶ Play Movie", type="primary"):
-            ext = "mp4" if fmt.startswith("MP4") else "m3u8"
-            url = build_stream_url(streams[idx].get("stream_id"), "vod", ext)
-            st.session_state["current_vod_url"] = url
+        selected = streams[idx]
+        sid = selected.get("stream_id")
+        # VOD: try mp4, fallback to m3u8
+        if isinstance(sid, str) and sid.startswith("http"):
+            url_mp4 = sid
+            url_hls = sid
+        else:
+            url_mp4 = build_stream_url(str(sid), "vod", "mp4")
+            url_hls = build_stream_url(str(sid), "vod", "m3u8")
 
-        if st.button("🔗 Show movie URL", key="show_vod_url"):
-            ext = "mp4" if fmt.startswith("MP4") else "m3u8"
-            url = build_stream_url(streams[idx].get("stream_id"), "vod", ext)
-            st.code(url, language="text")
-            warn_mixed_content(url)
+        fmt = st.radio("Format", ["MP4 (.mp4)", "HLS (.m3u8)"], horizontal=True, key="vod_fmt")
+        final_url = url_mp4 if fmt.startswith("MP4") else url_hls
+
+        if st.button("▶ Play Movie (embed)", type="primary"):
+            st.session_state["current_vod_url"] = final_url
+
+        if st.button("🔗 Show URL", key="show_vod_url"):
+            st.code(final_url, language="text")
+            warn_mixed_content(final_url)
+
+        external_open_button(final_url, "Open externally (HTTP)")
 
     with colR:
         url = st.session_state.get("current_vod_url")
@@ -341,11 +441,11 @@ def movies_tab():
             warn_mixed_content(url)
             render_hls_player(url, height=480, autoplay=False)
         else:
-            st.info("Pick a movie and press **Play Movie**.")
+            st.info("Pick a movie and press **Play Movie (embed)** or **Open externally (HTTP)**.")
 
 def series_tab():
     st.subheader("📺 Series")
-    st.info("If your provider exposes series as VOD, use **Search** or browse VOD categories.")
+    st.info("Use **Search** or VOD categories for series (depends on provider).")
 
 def search_tab():
     st.subheader("🔍 Search")
@@ -355,12 +455,12 @@ def search_tab():
     q_low = q.strip().lower()
     results: List[Dict[str, Any]] = []
 
-    ok_l, live_streams, err_l = get_live_streams()
+    ok_l, live_streams, _ = get_live_streams()
     if ok_l:
         for it in live_streams:
             if q_low in (it.get("name") or "").lower():
                 results.append({**it, "_kind": "live"})
-    ok_v, vod_streams, err_v = get_vod_streams()
+    ok_v, vod_streams, _ = get_vod_streams()
     if ok_v:
         for it in vod_streams:
             if q_low in (it.get("name") or "").lower():
@@ -374,31 +474,38 @@ def search_tab():
     for item in results[:40]:
         cols = st.columns([4, 1, 1])
         name = item.get("name", "Unknown")
-        sid = item.get("stream_id")
+        sid  = item.get("stream_id")
         kind = item.get("_kind", "live")
+        # Resolve direct URL if this came from M3U
+        if isinstance(sid, str) and sid.startswith("http"):
+            url = sid
+        else:
+            url = build_stream_url(str(sid), "live" if kind=="live" else "vod", "m3u8" if kind=="live" else "mp4")
+
         cols[0].write(f"**{name}** · #{sid}")
         cols[1].write("LIVE" if kind == "live" else "VOD")
-        if cols[2].button("Play", key=f"play_{kind}_{sid}"):
+        if cols[2].button("Play (embed)", key=f"play_{kind}_{sid}"):
             if kind == "live":
-                st.session_state["current_live_url"] = build_stream_url(sid, "live", "m3u8")
+                st.session_state["current_live_url"] = url
             else:
-                st.session_state["current_vod_url"] = build_stream_url(sid, "vod", "mp4")
+                st.session_state["current_vod_url"] = url
             st.rerun()
+        external_open_button(url, "Open externally (HTTP)")
 
 # =========================================================
 # App
 # =========================================================
 def main():
     st.title("📺 LionHD IPTV Player")
+    st.caption("This app uses Xtream **player_api.php** endpoints and falls back to the **M3U** playlist if API returns 401.")
 
-    # No blocking calls on first paint:
+    # No blocking network calls at load; diagnostics/buttons do the work.
+    st.sidebar.header("Connection")
+    st.sidebar.caption(f"URL: `{XSTREAM_URL}`")
+    st.sidebar.caption(f"User: `{USERNAME}`")
     sidebar_diagnostics()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["🏠 Live TV", "🎥 Movies", "📺 Series", "🔍 Search"])
-    with tab1:
-        live_tab()
-    with tab2:
-        movies_tab()
+    tab1, tab2, tab3, tab4 = st.tabs(["🏠 Live TV", "🎥 Movies", "📺 Series", "🔍 Searchtab()
     with tab3:
         series_tab()
     with tab4:
