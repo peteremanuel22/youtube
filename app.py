@@ -87,7 +87,6 @@ def _request_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Op
     try:
         code, body, _ = _request(url, params=params, headers=headers)
         if code != 200:
-            # Try to show a human-readable snippet of the body
             text = body[:500].decode("utf-8", errors="ignore")
             return False, None, f"HTTP {code}: {text.strip() or 'No body'}", code
         try:
@@ -171,7 +170,6 @@ def parse_m3u(m3u_text: str) -> List[Dict[str, Any]]:
 def get_auth() -> Tuple[bool, Dict[str, Any], str, int]:
     url = f"{XSTREAM_URL}/player_api.php"
     params = {"username": USERNAME, "password": PASSWORD}
-    # Try API with TV-like User-Agent
     ok, data, err, code = _request_json(url, params=params, headers=DEFAULT_HEADERS)
     if ok and "user_info" in data:
         return True, data, "", 200
@@ -186,7 +184,6 @@ def get_live_categories() -> Tuple[bool, List[Dict[str, Any]], str]:
         cats = data if isinstance(data, list) else data.get("categories", [])
         return True, cats or [], ""
     if code == 401:
-        # Use M3U groups as categories
         ok2, m3u, err2, _ = fetch_m3u()
         if not ok2:
             return False, [], f"API 401 and M3U failed: {err2}"
@@ -207,7 +204,6 @@ def get_live_streams(category_id: Optional[str] = None) -> Tuple[bool, List[Dict
         items = parse_m3u(m3u)
         if category_id:
             items = [it for it in items if (it.get("group") or "Other") == category_id]
-        # Convert into API-like shape
         streams = [{"name": it["name"], "stream_id": it.get("url"), "stream_icon": it.get("logo")} for it in items if it.get("url")]
         return True, streams, ""
     return False, [], err
@@ -219,7 +215,6 @@ def get_vod_categories() -> Tuple[bool, List[Dict[str, Any]], str]:
         cats = data if isinstance(data, list) else data.get("categories", [])
         return True, cats or [], ""
     if code == 401:
-        # derive VOD groups from M3U too (they’re usually mixed in)
         ok2, m3u, err2, _ = fetch_m3u()
         if not ok2:
             return False, [], f"API 401 and M3U failed: {err2}"
@@ -248,14 +243,14 @@ def get_vod_streams(category_id: Optional[str] = None) -> Tuple[bool, List[Dict[
 # Player helpers
 # =========================================================
 def render_hls_player(url: str, height: int = 460, autoplay: bool = False) -> None:
-    """We’ll still try to embed; browsers will block HTTP on HTTPS, so we also show 'open externally'."""
+    """HLS-capable HTML5 player using hls.js when needed (correct <script src>)."""
     element_id = f"video_{int(time.time() * 1000)}"
     auto_attr = "autoplay muted" if autoplay else ""
     html = f"""
     <html>
     <head>
       <meta charset="utf-8" />
-      https://cdn.jsdelivr.net/npm/hls.js@latest</script>
+      <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
       <style>
         body {{ margin:0; padding:0; background-color: transparent; }}
         video {{ width: 100%; height: {height}px; background: #000; }}
@@ -288,7 +283,10 @@ def render_hls_player(url: str, height: int = 460, autoplay: bool = False) -> No
     components.html(html, height=height + 20, scrolling=False)
 
 def external_open_button(url: str, label: str = "Open externally (HTTP)"):
-    st.markdown(f'<a href="{url}" target="_blank" rel="noopener noreferrer" class="st-btn">{label}</a>', unsafe_allow_html=True)
+    st.markdown(
+        f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>',
+        unsafe_allow_html=True
+    )
 
 # =========================================================
 # UI
@@ -323,12 +321,11 @@ def sidebar_diagnostics():
         # 3) M3U fallback test
         ok_m3u, m3u_text, err_m3u, code_m3u = fetch_m3u()
         if ok_m3u:
-            # light sanity check
             log(f"M3U → OK (HTTP 200, size={len(m3u_text)} bytes)")
         else:
             log(f"M3U → FAIL ({err_m3u})")
 
-        st.sidebar.success("Diagnostics complete. See logs at bottom.")
+        st.sidebar.success("Diagnostics complete. See logs below.")
 
 def live_tab():
     st.subheader("📡 Live TV")
@@ -359,7 +356,6 @@ def live_tab():
     with colL:
         labels = [f"{s.get('name','Unknown')} · #{s.get('stream_id')}" for s in streams]
         idx = st.selectbox("Channel", options=range(len(labels)), format_func=lambda i: labels[i])
-        # Determine url (API-style id vs M3U full URL)
         selected = streams[idx]
         sid = selected.get("stream_id")
         if isinstance(sid, str) and sid.startswith("http"):
@@ -415,7 +411,6 @@ def movies_tab():
         idx = st.selectbox("Title", options=range(min(len(labels), 200)), format_func=lambda i: labels[i])
         selected = streams[idx]
         sid = selected.get("stream_id")
-        # VOD: try mp4, fallback to m3u8
         if isinstance(sid, str) and sid.startswith("http"):
             url_mp4 = sid
             url_hls = sid
@@ -445,7 +440,7 @@ def movies_tab():
 
 def series_tab():
     st.subheader("📺 Series")
-    st.info("Use **Search** or VOD categories for series (depends on provider).")
+    st.info("Use **Search** or VOD categories for series (provider-dependent).")
 
 def search_tab():
     st.subheader("🔍 Search")
@@ -476,7 +471,6 @@ def search_tab():
         name = item.get("name", "Unknown")
         sid  = item.get("stream_id")
         kind = item.get("_kind", "live")
-        # Resolve direct URL if this came from M3U
         if isinstance(sid, str) and sid.startswith("http"):
             url = sid
         else:
@@ -497,7 +491,7 @@ def search_tab():
 # =========================================================
 def main():
     st.title("📺 LionHD IPTV Player")
-    st.caption("This app uses Xtream **player_api.php** endpoints and falls back to the **M3U** playlist if API returns 401.")
+    st.caption("Uses Xtream **player_api.php** with **M3U** fallback on HTTP 401.")
 
     # No blocking network calls at load; diagnostics/buttons do the work.
     st.sidebar.header("Connection")
@@ -505,7 +499,12 @@ def main():
     st.sidebar.caption(f"User: `{USERNAME}`")
     sidebar_diagnostics()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["🏠 Live TV", "🎥 Movies", "📺 Series", "🔍 Searchtab()
+    # ✅ Fixed: no stray characters; correct string literal
+    tab1, tab2, tab3, tab4 = st.tabs(["🏠 Live TV", "🎥 Movies", "📺 Series", "🔍 Search"])
+    with tab1:
+        live_tab()
+    with tab2:
+        movies_tab()
     with tab3:
         series_tab()
     with tab4:
