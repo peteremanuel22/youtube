@@ -48,17 +48,17 @@ def show_logs():
     if not st.session_state["logs"]:
         st.write("No logs yet.")
         return
-    st.text("\n".join(st.session_state["logs"][-400:]))
+    st.text("\n".join(st.session_state["logs"][-500:]))
 
 def is_https_page() -> bool:
-    # On Streamlit Cloud, your app is served over HTTPS.
+    # Streamlit Cloud apps are served over HTTPS.
     return True
 
 def warn_mixed_content(url: str):
     if is_https_page() and url.startswith("http://"):
         st.warning(
-            "This page is **HTTPS**, but the stream URL is **HTTP**. "
-            "Browsers block mixed content, so playback will be prevented. "
+            "This app is **HTTPS**, but the stream URL is **HTTP**. "
+            "Browsers block mixed content → playback will be prevented. "
             "Use an **HTTPS** stream or put an **HTTPS reverse proxy** in front of your provider.",
             icon="🔒",
         )
@@ -72,7 +72,6 @@ def _request_json(url: str, params: Optional[Dict[str, Any]] = None) -> Tuple[bo
         r = requests.get(url, params=params, timeout=REQ_TIMEOUT)
         if r.status_code != 200:
             return False, None, f"HTTP {r.status_code}"
-        # Might not always be JSON on failure; guard decoding
         try:
             return True, r.json(), ""
         except Exception as e:
@@ -95,7 +94,7 @@ def api_get(action: str, extra_params: Optional[Dict[str, Any]] = None) -> Tuple
 def build_stream_url(stream_id: str, typ: str = "live", ext: Optional[str] = None) -> str:
     """
     live:  /live/<user>/<pass>/<id>.m3u8
-    vod:   /movie/<user>/<pass>/<id>.mp4 (sometimes .m3u8 depending on provider)
+    vod:   /movie/<user>/<pass>/<id>.mp4 (some providers use .m3u8)
     """
     if typ == "live":
         ext = ext or "m3u8"
@@ -106,7 +105,7 @@ def build_stream_url(stream_id: str, typ: str = "live", ext: Optional[str] = Non
     return f"{XSTREAM_URL}/{path}/{USERNAME}/{PASSWORD}/{stream_id}.{ext}"
 
 def render_hls_player(url: str, height: int = 460, autoplay: bool = False) -> None:
-    """HLS-capable HTML5 player using hls.js when needed."""
+    """HLS-capable HTML5 player using hls.js when needed (fixed <script src> tag)."""
     element_id = f"video_{int(time.time() * 1000)}"
     auto_attr = "autoplay muted" if autoplay else ""
     html = f"""
@@ -207,42 +206,44 @@ def sidebar_diagnostics():
             icon="⚠️",
         )
 
+    # Buttons do the work; no network calls on page load
     if st.sidebar.button("Run quick diagnostics"):
-        # 1) Ping base (HEAD/GET player_api without creds)
-        base_ok, _, base_err = _request_json(f"{XSTREAM_URL}/player_api.php")
-        log(f"Ping player_api.php → {'OK' if base_ok else 'FAIL'} ({base_err or 'reachable'})")
+        # 1) Ping player_api without creds (some panels still reply)
+        ok_base, _, err_base = _request_json(f"{XSTREAM_URL}/player_api.php")
+        log(f"Ping player_api.php → {'OK' if ok_base else 'FAIL'} ({err_base or 'reachable'})")
 
         # 2) Auth test
-        ok, data, err = get_auth()
-        if ok:
-            user = data.get("user_info", {})
+        ok_auth, data_auth, err_auth = get_auth()
+        if ok_auth:
+            user = data_auth.get("user_info", {})
             log(f"Auth → OK (user={user.get('username')}, status={user.get('status','?')})")
         else:
-            log(f"Auth → FAIL ({err})")
+            log(f"Auth → FAIL ({err_auth})")
 
-        # 3) Live cat sample
-        ok, cats, err = get_live_categories()
-        if ok:
+        # 3) Live categories
+        ok_c, cats, err_c = get_live_categories()
+        if ok_c:
             log(f"Live categories → OK (count={len(cats)})")
         else:
-            log(f"Live categories → FAIL ({err})")
+            log(f"Live categories → FAIL ({err_c})")
 
-        # 4) Live stream sample
-        ok, streams, err = get_live_streams()
-        if ok:
+        # 4) Live streams sample
+        ok_s, streams, err_s = get_live_streams()
+        if ok_s:
             log(f"Live streams → OK (count={len(streams)})")
             if streams:
-                sample_id = streams[0].get("stream_id")
-                test_url = build_stream_url(sample_id, "live", "m3u8")
+                sid = streams[0].get("stream_id")
+                test_url = build_stream_url(sid, "live", "m3u8")
                 log(f"Sample live URL: {test_url}")
         else:
-            log(f"Live streams → FAIL ({err})")
+            log(f"Live streams → FAIL ({err_s})")
 
-        st.sidebar.success("Diagnostics complete. See logs in the bottom panel.")
+        st.sidebar.success("Diagnostics complete. See logs below.")
 
 def live_tab():
     st.subheader("📡 Live TV")
 
+    # Don’t fetch automatically; user clicks to avoid blocking
     ok, cats, err = get_live_categories()
     if not ok:
         st.error(f"Failed to load categories: {err}")
@@ -259,9 +260,9 @@ def live_tab():
                 break
 
     if st.button("Load Channels", type="secondary"):
-        ok, streams, err = get_live_streams(cat_id)
-        if not ok:
-            st.error(f"Failed to fetch streams: {err}")
+        ok_s, streams, err_s = get_live_streams(cat_id)
+        if not ok_s:
+            st.error(f"Failed to fetch streams: {err_s}")
         else:
             st.session_state["live_streams"] = streams
             st.success(f"Loaded {len(streams)} channels")
@@ -311,9 +312,9 @@ def movies_tab():
                 break
 
     if st.button("Load Movies", type="secondary"):
-        ok, streams, err = get_vod_streams(cat_id)
-        if not ok:
-            st.error(f"Failed to fetch VOD: {err}")
+        ok_s, streams, err_s = get_vod_streams(cat_id)
+        if not ok_s:
+            st.error(f"Failed to fetch VOD: {err_s}")
         else:
             st.session_state["vod_streams"] = streams
             st.success(f"Loaded {len(streams)} movies")
@@ -349,7 +350,7 @@ def movies_tab():
 
 def series_tab():
     st.subheader("📺 Series")
-    st.info("If your provider exposes series as VOD entries, use **Search** or browse VOD categories.")
+    st.info("If your provider exposes series as VOD, use **Search** or browse VOD categories.")
 
 def search_tab():
     st.subheader("🔍 Search")
@@ -357,16 +358,15 @@ def search_tab():
     if not q:
         return
     q_low = q.strip().lower()
-    # quick local search across cached datasets
     results: List[Dict[str, Any]] = []
 
-    ok, live_streams, err = get_live_streams()
-    if ok:
+    ok_l, live_streams, err_l = get_live_streams()
+    if ok_l:
         for it in live_streams:
             if q_low in (it.get("name") or "").lower():
                 results.append({**it, "_kind": "live"})
-    ok, vod_streams, err = get_vod_streams()
-    if ok:
+    ok_v, vod_streams, err_v = get_vod_streams()
+    if ok_v:
         for it in vod_streams:
             if q_low in (it.get("name") or "").lower():
                 results.append({**it, "_kind": "vod"})
@@ -396,24 +396,9 @@ def search_tab():
 def main():
     st.title("📺 LionHD IPTV Player")
 
+    # No blocking calls on first paint:
+    # - Auth & data fetch are on-demand via buttons/sections.
     sidebar_diagnostics()
-
-    # Try auth quickly (non-blocking; short timeout)
-    ok_auth, auth_data, auth_err = get_auth()
-    if not ok_auth:
-        st.info(
-            "Authentication did not succeed yet. You can still attempt to load categories. "
-            "If repeated calls fail, verify server/credentials/reachability."
-        )
-        st.caption(f"Auth status: {auth_err}")
-
-    else:
-        user = auth_data.get("user_info", {})
-        server = auth_data.get("server_info", {})
-        st.sidebar.success(f"✅ Logged in: **{user.get('username', 'Unknown')}**")
-        st.sidebar.info(f"📊 Active: {user.get('active_cons', 0)}/{user.get('max_connections', 0)}")
-        st.sidebar.caption(f"⏱️ Expires: {user.get('exp_date', 'N/A')}")
-        st.sidebar.caption(f"🌐 Server: {server.get('url', XSTREAM_URL)}")
 
     tab1, tab2, tab3, tab4 = st.tabs(["🏠 Live TV", "🎥 Movies", "📺 Series", "🔍 Search"])
     with tab1:
