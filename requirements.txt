@@ -1,8 +1,11 @@
 streamlit==1.38.0
-streamlit-player==0.3.0
 requests==2.32.3
 pandas==2.2.2
 cachetools==5.5.0
 rich==13.7.1
 markdown-it-py==3.0.0
 mdurl==0.1.2
+
+# video player replacements
+streamlit-lottie==0.0.5
+html5lib
