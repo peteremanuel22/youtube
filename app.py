@@ -1,284 +1,367 @@
-import streamlit as st
-import requests
-import json
-from streamlit_player import st_player
-import pandas as pd
-from typing import Dict, List, Any
+import os
 import time
+from typing import Dict, List, Any, Optional
 
-# Streamlit page config
+import requests
+import streamlit as st
+import streamlit.components.v1 as components
+
+# -----------------------------
+# Streamlit page configuration
+# -----------------------------
 st.set_page_config(
     page_title="IPTV Player - LionHD",
     page_icon="📺",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Configuration
-XSTREAM_URL = "http://lionzhd.com:8080"
-USERNAME = "shadyemad44"
-PASSWORD = "3398495"
+# -----------------------------
+# Configuration & Secrets
+# -----------------------------
+# You can put these in .streamlit/secrets.toml on Streamlit Cloud:
+# [xtream]
+# url = "http://lionzhd.com:8080"
+# username = "YOUR_USERNAME"
+# password = "YOUR_PASSWORD"
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_auth_token():
-    """Authenticate with Xstream server"""
+def _get_secret(section_key: str, key: str, default: Optional[str] = None) -> Optional[str]:
     try:
-        auth_url = f"{XSTREAM_URL}/player_api.php"
-        params = {
-            "username": USERNAME,
-            "password": PASSWORD
-        }
-        response = requests.get(auth_url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("user_info"):
-                return {
-                    "token": data.get("token", ""),
-                    "user_info": data.get("user_info", {}),
-                    "server_info": data.get("server_info", {})
-                }
-        return None
-    except Exception as e:
-        st.error(f"Authentication failed: {str(e)}")
-        return None
-def play_stream(url: str):
-    st.markdown(
-        f"""
-        <video width="100%" height="450" controls autoplay>
-            <source src="{url}" type="application/x-mpegURL">
-        </video>
-        """,
-        unsafe_allow_html=True,
-    )
-@st.cache_data(ttl=600)
-def get_categories(token: str = None) -> List[Dict]:
-    """Get available categories"""
-    try:
-        url = f"{XSTREAM_URL}/player_api.php?username={USERNAME}&password={PASSWORD}&action=get_live_categories"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("categories", [])
-        return []
-    except:
-        return []
+        if section_key in st.secrets and key in st.secrets[section_key]:
+            return st.secrets[section_key][key]
+    except Exception:
+        pass
+    # Fallback to flat secrets, then env, then default
+    return (
+        st.secrets.get(key, None)
+        if hasattr(st, "secrets") else None
+    ) or os.getenv(key.upper(), default)
 
-@st.cache_data(ttl=600)
-def get_live_streams(category_id: str = None) -> List[Dict]:
-    """Get live streams"""
-    try:
-        params = {"username": USERNAME, "password": PASSWORD}
-        if category_id:
-            params["category_id"] = category_id
-        url = f"{XSTREAM_URL}/player_api.php?action=get_live_streams"
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return data
-        return []
-    except:
-        return []
+# ⚠️ For convenience we fall back to your current hardcoded values.
+#    For production, move them to st.secrets and rotate the credentials.
+XSTREAM_URL = _get_secret("xtream", "url", "http://lionzhd.com:8080")
+USERNAME    = _get_secret("xtream", "username", "shadyemad44")
+PASSWORD    = _get_secret("xtream", "password", "3398495")
 
-@st.cache_data(ttl=600)
-def get_vod_streams(category_id: str = None) -> List[Dict]:
-    """Get VOD (Movies/Series)"""
-    try:
-        params = {"username": USERNAME, "password": PASSWORD}
-        if category_id:
-            params["category_id"] = category_id
-        url = f"{XSTREAM_URL}/player_api.php?action=get_vod_streams"
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return data
-        return []
-    except:
-        return []
+TIMEOUT = 12
+CACHE_TTL_SHORT = 300   # 5 minutes
+CACHE_TTL_MED   = 600   # 10 minutes
 
-@st.cache_data(ttl=600)
-def search_content(query: str) -> List[Dict]:
-    """Search across all content"""
-    try:
-        params = {"username": USERNAME, "password": PASSWORD, "search": query}
-        url_live = f"{XSTREAM_URL}/player_api.php?action=get_live_streams"
-        url_vod = f"{XSTREAM_URL}/player_api.php?action=get_vod_streams"
-        
-        live_results = requests.get(url_live, params=params, timeout=10).json()
-        vod_results = requests.get(url_vod, params=params, timeout=10).json()
-        
-        return live_results + vod_results
-    except:
-        return []
 
-def get_stream_url(stream_id: str, stream_type: str = "live"):
-    """Get direct stream URL"""
+# -----------------------------
+# Small utilities
+# -----------------------------
+def api_get(action: str, extra_params: Optional[Dict[str, Any]] = None) -> Any:
+    """Generic GET to the Xtream Codes API."""
+    params = {
+        "username": USERNAME,
+        "password": PASSWORD,
+        "action": action
+    }
+    if extra_params:
+        params.update(extra_params)
+    url = f"{XSTREAM_URL}/player_api.php"
+    r = requests.get(url, params=params, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+def build_stream_url(stream_id: str, typ: str = "live", ext: Optional[str] = None) -> str:
+    """
+    Construct a direct stream URL:
+      - live:  /live/<user>/<pass>/<stream_id>.m3u8
+      - movie: /movie/<user>/<pass>/<stream_id>.mp4   (some servers use .m3u8)
+    """
+    if typ == "live":
+        ext = ext or "m3u8"
+        path = "live"
+    else:
+        # 'vod' or 'movie'
+        ext = ext or "mp4"
+        path = "movie"
+    return f"{XSTREAM_URL}/{path}/{USERNAME}/{PASSWORD}/{stream_id}.{ext}"
+
+def render_hls_player(url: str, height: int = 460, autoplay: bool = False) -> None:
+    """
+    Render a simple HLS-capable HTML5 player using hls.js when needed.
+    Works on Streamlit Cloud without extra Python packages.
+    """
+    # Unique element id so multiple players don't collide
+    element_id = f"video_{int(time.time() * 1000)}"
+    auto_attr = "autoplay muted" if autoplay else ""
+    html = f"""
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+      <style>
+        body {{ margin:0; padding:0; background-color: transparent; }}
+        video {{ width: 100%; height: {height}px; background: #000; }}
+      </style>
+    </head>
+    <body>
+      <video id="{element_id}" controls {auto_attr} playsinline></video>
+      <script>
+        const video = document.getElementById("{element_id}");
+        const src = "{url}";
+        function play() {{
+          if (window.Hls && Hls.isSupported() && (src.endsWith(".m3u8") || src.includes(".m3u8"))) {{
+            const hls = new Hls();
+            hls.loadSource(src);
+            hls.attachMedia(video);
+          }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+            // Safari (native HLS)
+            video.src = src;
+          }} else {{
+            // MP4 or direct URL fallback
+            video.src = src;
+          }}
+        }}
+        play();
+      </script>
+    </body>
+    </html>
+    """
+    components.html(html, height=height + 20, scrolling=False)
+
+
+# -----------------------------
+# Cached API wrappers
+# -----------------------------
+@st.cache_data(ttl=CACHE_TTL_SHORT)
+def get_auth() -> Optional[Dict[str, Any]]:
+    """Authenticate and return user/server info."""
     try:
-        params = {
-            "username": USERNAME,
-            "password": PASSWORD,
-            "action": "get_live_streams" if stream_type == "live" else "get_vod_streams",
-            "stream_id": stream_id
-        }
         url = f"{XSTREAM_URL}/player_api.php"
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data:
-                return data[0].get("stream_url", "")
-        return ""
-    except:
-        return ""
+        params = {"username": USERNAME, "password": PASSWORD}
+        r = requests.get(url, params=params, timeout=TIMEOUT)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data or "user_info" not in data:
+            return None
+        return {
+            "user_info": data.get("user_info", {}),
+            "server_info": data.get("server_info", {})
+        }
+    except Exception:
+        return None
+
+@st.cache_data(ttl=CACHE_TTL_MED)
+def get_live_categories() -> List[Dict[str, Any]]:
+    """Get live categories (Xtream returns a list)."""
+    try:
+        data = api_get("get_live_categories")
+        # Many servers return a list, not {"categories": [...]}
+        return data if isinstance(data, list) else data.get("categories", [])
+    except Exception:
+        return []
+
+@st.cache_data(ttl=CACHE_TTL_MED)
+def get_vod_categories() -> List[Dict[str, Any]]:
+    try:
+        data = api_get("get_vod_categories")
+        return data if isinstance(data, list) else data.get("categories", [])
+    except Exception:
+        return []
+
+@st.cache_data(ttl=CACHE_TTL_MED)
+def get_live_streams(category_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    try:
+        extra = {}
+        if category_id:
+            extra["category_id"] = category_id
+        data = api_get("get_live_streams", extra)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+@st.cache_data(ttl=CACHE_TTL_MED)
+def get_vod_streams(category_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    try:
+        extra = {}
+        if category_id:
+            extra["category_id"] = category_id
+        data = api_get("get_vod_streams", extra)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+@st.cache_data(ttl=CACHE_TTL_MED)
+def search_everywhere(q: str) -> List[Dict[str, Any]]:
+    """Simple client-side search across live and VOD by name."""
+    q_low = q.strip().lower()
+    live = get_live_streams()
+    vod  = get_vod_streams()
+    out: List[Dict[str, Any]] = []
+    for item in (live or []):
+        if q_low in (item.get("name") or "").lower():
+            out.append({**item, "_kind": "live"})
+    for item in (vod or []):
+        if q_low in (item.get("name") or "").lower():
+            out.append({**item, "_kind": "vod"})
+    return out
+
+
+# -----------------------------
+# UI
+# -----------------------------
+def sidebar_info(auth: Dict[str, Any]) -> None:
+    st.sidebar.header("Connection")
+    user = auth.get("user_info", {})
+    server = auth.get("server_info", {})
+
+    st.sidebar.success(f"✅ Logged in as **{user.get('username', 'Unknown')}**")
+    st.sidebar.info(
+        f"📊 Active: {user.get('active_cons', 0)}/{user.get('max_connections', 0)}"
+    )
+    exp = user.get("exp_date")
+    st.sidebar.caption(f"⏱️ Expires: {exp if exp else 'N/A'}")
+
+    st.sidebar.subheader("Server")
+    st.sidebar.caption(f"🌐 {server.get('url', XSTREAM_URL)}")
+
+    with st.sidebar.expander("Settings", expanded=False):
+        st.caption(f"Server URL: `{XSTREAM_URL}`")
+        st.caption(f"Username: `{USERNAME}`")
+        # do not print password
+
+
+def live_tab():
+    st.header("📡 Live TV")
+
+    cats = get_live_categories()
+    cat_names = ["All"] + [c.get("category_name", f"Cat {i}") for i, c in enumerate(cats)]
+    selected_cat_name = st.selectbox("Category", cat_names, index=0)
+
+    # Resolve category_id
+    cat_id = None
+    if selected_cat_name != "All":
+        for c in cats:
+            if c.get("category_name") == selected_cat_name:
+                cat_id = c.get("category_id")
+                break
+
+    streams = get_live_streams(cat_id)
+    if not streams:
+        st.warning("No live streams available.")
+        return
+
+    colL, colR = st.columns([2, 3], gap="medium")
+
+    with colL:
+        names = [f"{s.get('name', 'Unknown')}  ·  #{s.get('stream_id')}" for s in streams]
+        idx = st.selectbox("Channel", options=range(len(names)), format_func=lambda i: names[i])
+        stream = streams[idx]
+        ext_choice = st.radio("Format", ["Auto (.m3u8)"], horizontal=True, key="live_fmt")
+
+        if st.button("▶ Play", type="primary"):
+            url = build_stream_url(stream.get("stream_id"), typ="live", ext="m3u8")
+            st.session_state["current_live_url"] = url
+
+    with colR:
+        url = st.session_state.get("current_live_url")
+        if url:
+            render_hls_player(url, height=480, autoplay=False)
+        else:
+            st.info("Select a channel and press **Play**.")
+
+def movies_tab():
+    st.header("🎬 Movies (VOD)")
+    cats = get_vod_categories()
+    cat_names = ["All"] + [c.get("category_name", f"Cat {i}") for i, c in enumerate(cats)]
+    selected_cat_name = st.selectbox("Movie Category", cat_names, index=0)
+
+    cat_id = None
+    if selected_cat_name != "All":
+        for c in cats:
+            if c.get("category_name") == selected_cat_name:
+                cat_id = c.get("category_id")
+                break
+
+    streams = get_vod_streams(cat_id)
+    if not streams:
+        st.warning("No movies available in this category.")
+        return
+
+    colL, colR = st.columns([2, 3], gap="medium")
+
+    with colL:
+        names = [f"{s.get('name', 'Unknown')}  ·  #{s.get('stream_id')}" for s in streams]
+        idx = st.selectbox("Title", options=range(min(len(names), 200)), format_func=lambda i: names[i])
+        stream = streams[idx]
+
+        fmt = st.radio("Preferred format", ["MP4 (.mp4)", "HLS (.m3u8)"], horizontal=True, key="vod_fmt")
+        if st.button("▶ Play Movie", type="primary"):
+            ext = "mp4" if fmt.startswith("MP4") else "m3u8"
+            url = build_stream_url(stream.get("stream_id"), typ="vod", ext=ext)
+            st.session_state["current_vod_url"] = url
+
+    with colR:
+        url = st.session_state.get("current_vod_url")
+        if url:
+            render_hls_player(url, height=480, autoplay=False)
+        else:
+            st.info("Pick a movie and press **Play Movie**.")
+
+def series_tab():
+    st.header("📺 Series")
+    st.info("Series often require separate series/episode endpoints depending on your Xtream provider. For now, use **Search** to find series VOD entries if your provider exposes them under VOD.")
+
+def search_tab():
+    st.header("🔍 Search")
+    q = st.text_input("Search across Live & Movies", placeholder="Type channel or movie name...")
+    if not q:
+        return
+    with st.spinner("Searching..."):
+        results = search_everywhere(q)
+
+    if not results:
+        st.warning("No matches found.")
+        return
+
+    st.success(f"Found {len(results)} items")
+
+    for item in results[:40]:  # limit to 40 for performance
+        cols = st.columns([4, 1, 1])
+        name = item.get("name", "Unknown")
+        sid = item.get("stream_id")
+        kind = item.get("_kind", "live")
+        cols[0].write(f"**{name}**  ·  #{sid}")
+        cols[1].badge("LIVE" if kind == "live" else "VOD", variant=("blue" if kind == "live" else "green"))
+        if cols[2].button("Play", key=f"play_{kind}_{sid}"):
+            if kind == "live":
+                st.session_state["current_live_url"] = build_stream_url(sid, "live", "m3u8")
+                st.switch_page("app.py")  # simple way to refresh; optional
+            else:
+                st.session_state["current_vod_url"] = build_stream_url(sid, "vod", "mp4")
+                st.switch_page("app.py")
+
 
 def main():
     st.title("📺 LionHD IPTV Player")
-    
-    # Sidebar
-    st.sidebar.header("Navigation")
-    
-    # Authentication check
+
     with st.spinner("Authenticating..."):
-        auth_data = get_auth_token()
-    
-    if not auth_data:
-        st.error("❌ Authentication failed. Please check credentials.")
+        auth = get_auth()
+
+    if not auth:
+        st.error("❌ Authentication failed. Please check credentials or server.")
         st.stop()
-    
-    user_info = auth_data["user_info"]
-    st.sidebar.success(f"✅ Logged in as: **{user_info.get('username', 'Unknown')}**")
-    st.sidebar.info(f"📊 Active Connections: {user_info.get('active_cons', 0)}/{user_info.get('max_connections', 0)}")
-    st.sidebar.info(f"⏱️ Expires: {user_info.get('exp_date', 'N/A')}")
-    
-    # Main tabs
+
+    # Sidebar
+    sidebar_info(auth)
+
+    # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["🏠 Live TV", "🎥 Movies", "📺 Series", "🔍 Search"])
-    
+
     with tab1:
-        st.header("📡 Live Channels")
-        categories = get_categories()
-        
-        if categories:
-            col1, col2 = st.columns([1, 3])
-            
-            with col1:
-                st.subheader("Categories")
-                selected_cat = st.selectbox("Select Category", 
-                                          ["All"] + [cat["category_name"] for cat in categories],
-                                          format_func=lambda x: x if x == "All" else x)
-            
-            with col2:
-                if selected_cat == "All":
-                    streams = get_live_streams()
-                else:
-                    cat_id = next((cat["category_id"] for cat in categories if cat["category_name"] == selected_cat), None)
-                    streams = get_live_streams(cat_id)
-                
-                if streams:
-                    for stream in streams[:20]:  # Limit to 20 for performance
-                        col_a, col_b = st.columns([3, 1])
-                        with col_a:
-                            if st.button(f"▶️ {stream.get('name', 'Unknown')}", key=f"live_{stream.get('stream_id')}"):
-                                stream_url = get_stream_url(stream["stream_id"], "live")
-                                if stream_url:
-                                    st_player(stream_url, height=400, config={
-                                        "controls": True,
-                                        "autoplay": False,
-                                        "loop": False
-                                    })
-                                else:
-                                    st.error("Failed to load stream")
-                        with col_b:
-                            st.info(f"{stream.get('stream_icon', '')}")
-                else:
-                    st.warning("No live streams available")
-    
+        live_tab()
     with tab2:
-        st.header("🎬 Movies")
-        categories = get_categories()  # VOD categories often same as live
-        
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            selected_cat = st.selectbox("Movie Category", 
-                                      ["All"] + [cat["category_name"] for cat in categories[:10]],
-                                      format_func=lambda x: x if x == "All" else x)
-        
-        with col2:
-            if selected_cat == "All":
-                vod_streams = get_vod_streams()
-            else:
-                cat_id = next((cat["category_id"] for cat in categories if cat["category_name"] == selected_cat), None)
-                vod_streams = get_vod_streams(cat_id)
-            
-            if vod_streams:
-                for stream in vod_streams[:12]:
-                    col_a, col_b = st.columns([3, 1])
-                    with col_a:
-                        if st.button(f"🎥 {stream.get('name', 'Unknown')}", key=f"movie_{stream.get('stream_id')}"):
-                            stream_url = get_stream_url(stream["stream_id"], "vod")
-                            if stream_url:
-                                st.markdown(
-    f"""
-    <video width="100%" height="400" controls>
-        <source src="{stream_url}" type="application/x-mpegURL">
-    </video>
-    """,
-    unsafe_allow_html=True,
-)
-
-                            else:
-                                st.error("Failed to load movie")
-                    with col_b:
-                        st.caption(stream.get('rating', ''))
-    
+        movies_tab()
     with tab3:
-        st.header("📺 Series")
-        # Series often in VOD with specific categories
-        st.info("Series are typically organized by category in Movies tab")
-        search_query = st.text_input("Search for Series", placeholder="Enter series name")
-        if search_query:
-            results = search_content(search_query)
-            for item in results[:10]:
-                if st.button(f"📺 {item.get('name', 'Unknown')}", key=f"series_{item.get('stream_id')}"):
-                    stream_url = get_stream_url(item["stream_id"], "vod")
-                    if stream_url:
-                        st.markdown(
-    f"""
-    <video width="100%" height="400" controls>
-        <source src="{stream_url}" type="application/x-mpegURL">
-    </video>
-    """,
-    unsafe_allow_html=True,
-)
-
-    
+        series_tab()
     with tab4:
-        st.header("🔍 Search All Content")
-        search_query = st.text_input("Search Live, Movies, Series...", placeholder="Enter search term")
-        
-        if search_query:
-            with st.spinner("Searching..."):
-                results = search_content(search_query)
-            
-            if results:
-                st.success(f"Found {len(results)} results")
-                for item in results[:15]:
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        stream_type = "📡 Live" if "live" in item.get("stream_type", "").lower() else "🎥 VOD"
-                        if st.button(f"{stream_type} {item.get('name', 'Unknown')}", key=f"search_{item.get('stream_id')}"):
-                            stream_url = get_stream_url(item["stream_id"])
-                            if stream_url:
-                                st.markdown(
-    f"""
-    <video width="100%" height="400" controls>
-        <source src="{stream_url}" type="application/x-mpegURL">
-    </video>
-    """,
-    unsafe_allow_html=True,
-)
+        search_tab()
 
-                    with col2:
-                        st.caption(item.get('category_name', ''))
 
 if __name__ == "__main__":
     main()
-
-
