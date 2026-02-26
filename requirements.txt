@@ -1,5 +1,4 @@
-# Python 3.13-compatible set
-streamlit==1.54.0       # 3.13 supported since 1.41
+streamlit==1.54.0
 requests==2.32.3
 cachetools==5.5.0
 rich==13.7.1
