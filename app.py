@@ -1,11 +1,10 @@
 import streamlit as st
 import yt_dlp
-import requests
-from urllib.parse import urlparse, parse_qs, unquote
+import re
+from urllib.parse import urlparse, parse_qs
 import time
-from PIL import Image
-import io
 
+# Page config
 st.set_page_config(
     page_title="YouTube Proxy",
     page_icon="🎥",
@@ -13,280 +12,251 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Hide Streamlit elements
-hide_streamlit_style = """
-    <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .st-emotion-cache-1r52f5n {padding: 0.5rem 1rem;}
-    </style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {font-size: 3rem; font-weight: bold; color: #FF0000;}
+    .video-container {background: #000; padding: 20px; border-radius: 10px;}
+    .error-box {background: #fee; padding: 15px; border-radius: 8px; border-left: 5px solid #f87171;}
+    .success-box {background: #dcfce7; padding: 15px; border-radius: 8px; border-left: 5px solid #10b981;}
+</style>
+""", unsafe_allow_html=True)
 
 class YouTubeProxy:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
+        pass
     
-    def search_youtube(self, query, max_results=20):
-        """Reliable YouTube search using yt-dlp"""
+    @st.cache_data(ttl=300)
+    def search_videos(self, query, max_results=15):
+        """Search YouTube videos using yt-dlp"""
+        print(f"🔍 Searching for: {query}")  # Debug log
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': 'in_playlist',
+            'playlistend': max_results,
+        }
+        
         try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': True,  # Don't download, just extract metadata
-                'playlistend': max_results,
-            }
-            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                search_results = ydl.extract_info(
-                    f"ytsearch{max_results}:{query}", 
-                    download=False
-                )
-            
-            videos = []
-            if 'entries' in search_results:
-                for entry in search_results['entries']:
-                    if entry:
-                        video_id = entry.get('id')
-                        title = entry.get('title', 'Unknown Title')
+                results = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
+                print(f"✅ Search returned {len(results.get('entries', []))} results")
+                
+                videos = []
+                for entry in results.get('entries', []):
+                    if entry and entry.get('id'):
                         duration = entry.get('duration', 0)
-                        uploader = entry.get('uploader', 'Unknown Channel')
-                        
-                        # Format duration
-                        if duration:
-                            minutes = duration // 60
-                            seconds = duration % 60
-                            duration_str = f"{minutes}:{seconds:02d}"
-                        else:
-                            duration_str = "Live"
+                        duration_str = self.format_duration(duration)
                         
                         videos.append({
-                            'title': title[:100] + '...' if len(title) > 100 else title,
-                            'video_id': video_id,
+                            'id': entry['id'],
+                            'title': entry.get('title', 'Unknown')[:120],
+                            'channel': entry.get('uploader', 'Unknown'),
                             'duration': duration_str,
-                            'channel': uploader,
-                            'thumbnail': f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
-                            'url': f"https://www.youtube.com/watch?v={video_id}"
+                            'thumbnail': f"https://i.ytimg.com/vi/{entry['id']}/mqdefault.jpg"
                         })
-            
-            return videos
-            
+                return videos
         except Exception as e:
-            st.error(f"Search failed: {str(e)}")
+            print(f"❌ Search error: {str(e)}")
             return []
     
+    @st.cache_data(ttl=300)
     def get_video_info(self, video_id):
         """Get detailed video information"""
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
         try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-            }
-            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
                 duration = info.get('duration', 0)
                 
-                # Format duration
-                if duration:
-                    minutes = duration // 60
-                    seconds = duration % 60
-                    duration_str = f"{minutes}:{seconds:02d}"
-                else:
-                    duration_str = "Live"
-                
                 return {
-                    'title': info.get('title', ''),
-                    'duration': duration_str,
-                    'channel': info.get('uploader', ''),
-                    'view_count': info.get('view_count', 0),
-                    'thumbnail': info.get('thumbnail', f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"),
-                    'description': info.get('description', '')[:500] + '...' if len(info.get('description', '')) > 500 else info.get('description', ''),
-                    'upload_date': info.get('upload_date', ''),
-                    'like_count': info.get('like_count', 0)
+                    'title': info.get('title', 'Unknown'),
+                    'channel': info.get('uploader', 'Unknown'),
+                    'duration': self.format_duration(duration),
+                    'views': f"{info.get('view_count', 0):,}",
+                    'description': info.get('description', '')[:300] + '...' if len(info.get('description', '')) > 300 else info.get('description', ''),
+                    'thumbnail': info.get('thumbnail', f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg')
                 }
-        except:
+        except Exception as e:
+            print(f"❌ Video info error: {str(e)}")
             return {}
     
-    def get_best_stream_url(self, video_id):
-        """Get the best available stream URL"""
+    def get_stream_url(self, video_id):
+        """Get direct stream URL for video"""
+        print(f"🎥 Getting stream for: {video_id}")
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best',
+            'noplaylist': True,
+        }
+        
         try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'format': 'best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best',
-                'noplaylist': True,
-            }
-            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
                 
-                # Prefer direct URL or HLS
-                if info.get('url'):
-                    return info['url']
-                
-                # Fallback to formats
-                for f in info.get('formats', []):
-                    if f.get('url') and f.get('vcodec') != 'none' and f.get('acodec') != 'none':
-                        return f['url']
-                
-                return None
+                # Get the best available URL
+                url = info.get('url') or info.get('formats', [{}])[0].get('url')
+                print(f"✅ Stream URL found: {'Yes' if url else 'No'}")
+                return url
         except Exception as e:
-            st.error(f"Stream URL error: {str(e)}")
+            print(f"❌ Stream error: {str(e)}")
             return None
+    
+    def extract_video_id(self, url):
+        """Extract video ID from YouTube URL"""
+        patterns = [
+            r'(?:v=|\/)([0-9A-Za-z_-]{11})',
+            r'(?:embed\/)([0-9A-Za-z_-]{11})',
+            r'(?:watch\?v=)([0-9A-Za-z_-]{11})',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+    
+    @staticmethod
+    def format_duration(seconds):
+        if not seconds or seconds == 0:
+            return "Live"
+        minutes = seconds // 60
+        secs = seconds % 60
+        return f"{minutes}:{secs:02d}"
 
 # Initialize proxy
-@st.cache_resource
-def get_proxy():
-    return YouTubeProxy()
+proxy = YouTubeProxy()
 
-proxy = get_proxy()
+# Header
+st.markdown('<h1 class="main-header">🎥 YouTube Proxy</h1>', unsafe_allow_html=True)
+st.markdown("**✅ Works behind corporate firewalls** - No direct YouTube connections!")
 
-# App state
-if 'search_results' not in st.session_state:
-    st.session_state.search_results = []
-if 'current_video' not in st.session_state:
-    st.session_state.current_video = None
-if 'search_query' not in st.session_state:
-    st.session_state.search_query = ""
+# Tabs for Search and URL
+tab1, tab2 = st.tabs(["🔍 Search", "🔗 Direct URL"])
 
-st.title("🎥 YouTube Proxy")
-st.markdown("**Corporate-friendly YouTube access** - No direct YouTube connections from your device!")
-
-# Search interface
-col1, col2 = st.columns([4, 1])
-
-with col1:
-    search_query = st.text_input(
-        "🔍 Search videos", 
-        value=st.session_state.search_query,
-        placeholder="Type to search YouTube...",
-        label_visibility="collapsed",
-        help="Search works exactly like YouTube!"
-    )
-
-with col2:
-    col2_search, col2_clear = st.columns(2)
-    with col2_search:
-        search_button = st.button("🔍", type="primary", use_container_width=True)
-    with col2_clear:
-        clear_button = st.button("🗑️", use_container_width=True)
-
-if clear_button:
-    st.session_state.search_query = ""
-    st.session_state.search_results = []
-    st.session_state.current_video = None
-    st.rerun()
-
-# Execute search
-if search_query and (search_button or search_query != st.session_state.search_query):
-    st.session_state.search_query = search_query
-    with st.spinner(f"🔎 Searching YouTube for '{search_query}'..."):
-        st.session_state.search_results = proxy.search_youtube(search_query, max_results=15)
+with tab1:
+    # Search tab
+    st.subheader("Search Videos")
     
-    if st.session_state.search_results:
-        st.success(f"✅ Found {len(st.session_state.search_results)} videos!")
-    else:
-        st.warning("❌ No results found. Try different keywords.")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        search_query = st.text_input("Enter search term", placeholder="e.g., rick roll, coding tutorial")
+    with col2:
+        search_pressed = st.button("🔍 Search", type="primary")
     
-    st.rerun()
+    if search_pressed and search_query:
+        with st.spinner("Searching YouTube..."):
+            results = proxy.search_videos(search_query)
+        
+        if results:
+            st.markdown(f'<div class="success-box">✅ Found {len(results)} videos!</div>', unsafe_allow_html=True)
+            
+            for i, video in enumerate(results):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**{video['title']}**")
+                    st.caption(f"👤 {video['channel']} • ⏱️ {video['duration']}")
+                with col2:
+                    if st.button("▶️ Play", key=f"search_play_{i}"):
+                        st.session_state.current_video = video
+                        st.session_state.video_mode = 'search'
+                        st.rerun()
+                st.markdown("---")
+        else:
+            st.markdown('<div class="error-box">❌ No videos found. Try different keywords.</div>', unsafe_allow_html=True)
 
-# Display search results
-if st.session_state.search_results:
-    st.markdown("---")
-    st.subheader(f"📺 Search Results for '{st.session_state.search_query}'")
+with tab2:
+    # Direct URL tab
+    st.subheader("Load YouTube URL")
+    url_input = st.text_input("Paste YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
     
-    for i, video in enumerate(st.session_state.search_results):
-        with st.container():
-            col1, col2, col3 = st.columns([3, 1, 1])
-            
-            with col1:
-                st.markdown(f"**{video['title']}**")
-                st.caption(f"👤 {video['channel']} • ⏱️ {video['duration']}")
-            
-            with col2:
-                if st.button("▶️ **PLAY**", key=f"play_{i}", use_container_width=True):
-                    st.session_state.current_video = video
-                    st.rerun()
-            
-            with col3:
-                st.markdown(f"[**Watch on YT**]({video['url']})")
-            
-            st.markdown("---")
+    if st.button("▶️ Load Video", type="primary") and url_input:
+        video_id = proxy.extract_video_id(url_input)
+        if video_id:
+            st.session_state.current_video = {
+                'id': video_id,
+                'title': 'Loading...',
+                'channel': 'Loading...',
+                'duration': 'Loading...'
+            }
+            st.session_state.video_mode = 'url'
+            st.rerun()
+        else:
+            st.error("❌ Invalid YouTube URL")
 
 # Video Player Section
-if st.session_state.current_video:
+if 'current_video' in st.session_state and st.session_state.current_video:
     st.markdown("---")
-    st.markdown("## 🎬 **Now Playing**")
+    st.markdown("## 🎬 Video Player")
     
     video = st.session_state.current_video
-    video_info = proxy.get_video_info(video['video_id'])
+    video_id = video['id']
     
-    # Video info row
-    col1, col2 = st.columns([2, 1])
+    # Load video info
+    with st.spinner("Loading video info..."):
+        video_info = proxy.get_video_info(video_id)
     
+    # Video header
+    col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        st.markdown(f"### 🎥 {video_info.get('title', video['title'])}")
-        st.caption(f"👤 {video_info.get('channel', video['channel'])}")
-        
-        if video_info.get('view_count'):
-            st.caption(f"👀 {video_info['view_count']:,} views")
+        st.markdown(f"### 🎥 **{video_info.get('title', 'Loading...')}**")
+        st.caption(f"👤 {video_info.get('channel', 'Unknown')} • ⏱️ {video_info.get('duration', 'Unknown')}")
     
     with col2:
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            if st.button("🔙 Back to Results", key="back_results", use_container_width=True):
-                st.session_state.current_video = None
-                st.rerun()
-        with col_btn2:
-            st.markdown(f"[**Open on YT**](https://youtube.com/watch?v={video['video_id']})")
+        if st.button("🔙 Back", type="secondary"):
+            del st.session_state.current_video
+            st.rerun()
+    
+    with col3:
+        st.markdown(f"[**YouTube**](https://youtube.com/watch?v={video_id})")
     
     # Video player
-    st.markdown("---")
-    with st.container():
-        stream_url = proxy.get_best_stream_url(video['video_id'])
-        
-        if stream_url:
-            st.video(stream_url, format="video/mp4")
-            
-            # Reload button for HLS streams that might expire
-            st.caption("🔄 Video stalled? Click below to reload:")
-            if st.button("🔄 Reload Video", key="reload_video"):
-                st.rerun()
-        else:
-            st.error("❌ Could not load video stream. This video might be age-restricted or unavailable.")
-            st.info("💡 Try another video or check if it's available in your region.")
+    st.markdown('<div class="video-container">', unsafe_allow_html=True)
     
-    # Additional info
-    with st.expander("ℹ️ Video Details", expanded=False):
+    stream_url = proxy.get_stream_url(video_id)
+    
+    if stream_url:
+        st.video(stream_url)
+        st.success("✅ Video loaded successfully!")
+        
+        # Reload button
+        if st.button("🔄 Reload Video"):
+            st.rerun()
+    else:
+        st.error("❌ Could not load video stream")
+        st.info("💡 This video might be age-restricted, private, or region-blocked.")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Details
+    with st.expander("ℹ️ Details"):
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown(f"**Duration:** {video_info.get('duration', video['duration'])}")
-            if video_info.get('upload_date'):
-                st.markdown(f"**Uploaded:** {video_info['upload_date']}")
+            st.metric("Views", video_info.get('views', 'N/A'))
         with col2:
-            if video_info.get('like_count'):
-                st.markdown(f"**Likes:** {video_info['like_count']:,}")
+            st.markdown(f"**Duration:** {video_info.get('duration', 'N/A')}")
         
         if video_info.get('description'):
-            st.markdown("**Description:**")
             st.markdown(video_info['description'])
 
-# Welcome message
-if not st.session_state.search_query and not st.session_state.search_results and not st.session_state.current_video:
-    st.markdown("""
-    ### 🚀 **How to use:**
-    1. **Search** for any video using the search bar above
-    2. **Click PLAY** on any result to watch instantly
-    3. **No YouTube domains** are accessed from your device ✅
-    
-    **Works perfectly behind corporate firewalls!** 🛡️
+# Initialize session state
+if 'current_video' not in st.session_state:
+    st.session_state.current_video = None
+
+# Debug info (remove in production)
+with st.expander("🐛 Debug Info"):
+    st.code(f"""
+Session state keys: {list(st.session_state.keys())}
+yt-dlp version: {yt_dlp.version.__version__}
+Current video: {getattr(st.session_state.current_video, 'id', 'None')}
     """)
 
 # Footer
 st.markdown("---")
-st.caption("🎥 Powered by yt-dlp | 📡 Proxied through Streamlit Cloud")
+st.caption("🎥 YouTube Proxy | Powered by yt-dlp | Deployed on Streamlit Cloud")
