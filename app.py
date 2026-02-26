@@ -80,7 +80,7 @@ class YouTubeProxy:
                     'duration': self.format_duration(duration),
                     'views': f"{info.get('view_count', 0):,}",
                     'description': info.get('description', '')[:300] + '...' if len(info.get('description', '')) > 300 else info.get('description', ''),
-                    'thumbnail': info.get('thumbnail', f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg')
+                    'thumbnail': info.get('thumbnail', f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg")
                 }
         except Exception as e:
             print(f"❌ Video info error: {str(e)}")
@@ -102,7 +102,7 @@ class YouTubeProxy:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
                 
                 # Get the best available URL
-                url = info.get('url') or info.get('formats', [{}])[0].get('url')
+                url = info.get('url') or next((f.get('url') for f in info.get('formats', []) if f.get('url')), None)
                 print(f"✅ Stream URL found: {'Yes' if url else 'No'}")
                 return url
         except Exception as e:
@@ -179,6 +179,7 @@ with tab2:
     if st.button("▶️ Load Video", type="primary") and url_input:
         video_id = proxy.extract_video_id(url_input)
         if video_id:
+            st.success(f"✅ Found video ID: {video_id}")
             st.session_state.current_video = {
                 'id': video_id,
                 'title': 'Loading...',
@@ -210,7 +211,8 @@ if 'current_video' in st.session_state and st.session_state.current_video:
     
     with col2:
         if st.button("🔙 Back", type="secondary"):
-            del st.session_state.current_video
+            if 'current_video' in st.session_state:
+                del st.session_state.current_video
             st.rerun()
     
     with col3:
@@ -248,14 +250,6 @@ if 'current_video' in st.session_state and st.session_state.current_video:
 # Initialize session state
 if 'current_video' not in st.session_state:
     st.session_state.current_video = None
-
-# Debug info (remove in production)
-with st.expander("🐛 Debug Info"):
-    st.code(f"""
-Session state keys: {list(st.session_state.keys())}
-yt-dlp version: {yt_dlp.version.__version__}
-Current video: {getattr(st.session_state.current_video, 'id', 'None')}
-    """)
 
 # Footer
 st.markdown("---")
