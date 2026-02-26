@@ -1,5 +1,7 @@
-streamlit==1.38.0
+# Python 3.13-compatible set
+streamlit==1.54.0       # 3.13 supported since 1.41; 1.54 is current stable
 requests==2.32.3
-pandas==2.2.2
 cachetools==5.5.0
 rich==13.7.1
+# NOTE: pandas removed because your app doesn't use it.
+# If you NEED pandas, add: pandas==2.2.3  (first release compatible with Python 3.13)
